@@ -237,7 +237,13 @@ def validate(
         "total": 0.0,
         "chamfer": 0.0,
         "normal": 0.0,
-        "nc": 0.0
+        "nc": 0.0,
+        # BUG FIX: track CD(P_simplified, P_input) separately.
+        # The existing "chamfer" measures CD(P_recon, P_input) which was
+        # misleadingly low even when the visual quality was bad.
+        # "cd_simplified" measures how well the SELECTOR preserves the
+        # original shape — this is the true simplification quality metric.
+        "cd_simplified": 0.0,
     }
 
     pbar = tqdm(
@@ -259,18 +265,29 @@ def validate(
         for k, v in loss.items():
             totals[k] += v.item()
 
+        # BUG FIX: compute CD(P_simplified, P_input) every val step
+        with torch.no_grad():
+            P_s   = out["P_simplified"]   # (B, M, 3)
+            # pairwise dist: P_s -> P
+            diff  = P_s.unsqueeze(2) - P.unsqueeze(1)          # (B,M,N,3)
+            d2    = (diff ** 2).sum(-1)                         # (B,M,N)
+            s2p   = d2.min(dim=2).values.mean()                 # scalar: simp→orig
+            # pairwise dist: P -> P_s
+            diff2 = P.unsqueeze(2) - P_s.unsqueeze(1)          # (B,N,M,3)
+            d2b   = (diff2 ** 2).sum(-1)                        # (B,N,M)
+            p2s   = d2b.min(dim=2).values.mean()                # scalar: orig→simp
+            totals["cd_simplified"] += (s2p + p2s).item()
+
         if rank == 0:
 
-            avg_total = totals["total"] / (step + 1)
-            avg_cd    = totals["chamfer"] / (step + 1)
-            avg_n     = totals["normal"] / (step + 1)
-            avg_nc    = totals["nc"] / (step + 1)
+            avg_total   = totals["total"]  / (step + 1)
+            avg_cd      = totals["chamfer"] / (step + 1)
+            avg_cd_simp = totals["cd_simplified"] / (step + 1)
 
             pbar.set_postfix({
-                "loss": f"{avg_total:.4f}",
-                "cd":   f"{avg_cd:.4f}",
-                "n":    f"{avg_n:.4f}",
-                "nc":   f"{avg_nc:.4f}",
+                "loss":    f"{avg_total:.4f}",
+                "cd_rec":  f"{avg_cd:.4f}",
+                "cd_simp": f"{avg_cd_simp:.4f}",
             })
 
             pbar.update(1)
@@ -367,7 +384,7 @@ def ddp_worker(rank: int, world_size: int, args: argparse.Namespace) -> None:
     # ── Model ─────────────────────────────────────────────────────────
     model = PointCloudSimplifier(M=args.M, k=args.k).to(device)
     model = nn.SyncBatchNorm.convert_sync_batchnorm(model)
-    model = DDP(model, device_ids=[rank], output_device=rank, find_unused_parameters=True)
+    model = DDP(model, device_ids=[rank], output_device=rank, find_unused_parameters=False)
 
     optimizer = optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
@@ -456,7 +473,8 @@ def ddp_worker(rank: int, world_size: int, args: argparse.Namespace) -> None:
                 f"[Epoch {epoch+1}/{args.epochs}]  "
                 f"train={train_losses['total']:.4f}  "
                 f"val={val_losses['total']:.4f}  "
-                f"cd={val_losses['chamfer']:.4f}  "
+                f"cd_rec={val_losses['chamfer']:.4f}  "
+                f"cd_simp={val_losses['cd_simplified']:.4f}  "
                 f"n={val_losses['normal']:.4f}  "
                 f"nc={val_losses['nc']:.4f}  "
                 f"lr={lr_now:.2e}"
