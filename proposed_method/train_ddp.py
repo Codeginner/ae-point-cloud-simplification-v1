@@ -160,7 +160,8 @@ def train_one_epoch(
         "total": 0.0,
         "chamfer": 0.0,
         "normal": 0.0,
-        "nc": 0.0
+        "nc": 0.0,
+        "score": 0.0,
     }
 
     # ONE EPOCH = ONE LINE
@@ -238,6 +239,7 @@ def validate(
         "chamfer": 0.0,
         "normal": 0.0,
         "nc": 0.0,
+        "score": 0.0,
         # BUG FIX: track CD(P_simplified, P_input) separately.
         # The existing "chamfer" measures CD(P_recon, P_input) which was
         # misleadingly low even when the visual quality was bad.
@@ -384,7 +386,7 @@ def ddp_worker(rank: int, world_size: int, args: argparse.Namespace) -> None:
     # ── Model ─────────────────────────────────────────────────────────
     model = PointCloudSimplifier(M=args.M, k=args.k).to(device)
     model = nn.SyncBatchNorm.convert_sync_batchnorm(model)
-    model = DDP(model, device_ids=[rank], output_device=rank, find_unused_parameters=False)
+    model = DDP(model, device_ids=[rank], output_device=rank, find_unused_parameters=True)
 
     optimizer = optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
@@ -475,6 +477,7 @@ def ddp_worker(rank: int, world_size: int, args: argparse.Namespace) -> None:
                 f"val={val_losses['total']:.4f}  "
                 f"cd_rec={val_losses['chamfer']:.4f}  "
                 f"cd_simp={val_losses['cd_simplified']:.4f}  "
+                f"score={val_losses['score']:.4f}  "
                 f"n={val_losses['normal']:.4f}  "
                 f"nc={val_losses['nc']:.4f}  "
                 f"lr={lr_now:.2e}"
